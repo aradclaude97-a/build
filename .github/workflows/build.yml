@@ -1,3 +1,4 @@
+
 name: Build iOS Launcher
 
 on:
@@ -66,8 +67,8 @@ jobs:
                   applicationId = "com.ioslauncher"
                   minSdk = 24
                   targetSdk = 34
-                  versionCode = 1
-                  versionName = "1.0"
+                  versionCode = 2
+                  versionName = "2.0"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -85,10 +86,14 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+              <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
               <queries>
                   <intent>
                       <action android:name="android.intent.action.MAIN" />
                       <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
                   </intent>
                   <intent>
                       <action android:name="android.intent.action.DIAL" />
@@ -108,6 +113,7 @@ jobs:
               <application
                   android:label="iOS Launcher"
                   android:icon="@android:drawable/sym_def_app_icon"
+                  android:supportsRtl="false"
                   android:theme="@android:style/Theme.Material.Wallpaper.NoTitleBar">
                   <activity
                       android:name=".MainActivity"
@@ -126,56 +132,245 @@ jobs:
           </manifest>
           EOF
 
+          cat > app/src/main/java/com/ioslauncher/Model.kt << 'EOF'
+          package com.ioslauncher
+
+          import android.content.Context
+          import org.json.JSONArray
+          import org.json.JSONObject
+
+          class Item(
+              val type: String,
+              var key: String,
+              var w: Int = 1,
+              var h: Int = 1,
+              var name: String = "",
+              var pkgs: MutableList<String> = mutableListOf(),
+              var widgetId: Int = -1
+          )
+
+          class Store(ctx: Context) {
+              private val p = ctx.getSharedPreferences("launcher", Context.MODE_PRIVATE)
+
+              var cols: Int
+                  get() = p.getInt("cols", 4)
+                  set(v) { p.edit().putInt("cols", v).apply() }
+              var rows: Int
+                  get() = p.getInt("rows", 6)
+                  set(v) { p.edit().putInt("rows", v).apply() }
+              var iconPct: Int
+                  get() = p.getInt("iconPct", 100)
+                  set(v) { p.edit().putInt("iconPct", v).apply() }
+              var roundPct: Int
+                  get() = p.getInt("roundPct", 23)
+                  set(v) { p.edit().putInt("roundPct", v).apply() }
+              var labels: Boolean
+                  get() = p.getBoolean("labels", true)
+                  set(v) { p.edit().putBoolean("labels", v).apply() }
+              var showClock: Boolean
+                  get() = p.getBoolean("clock", true)
+                  set(v) { p.edit().putBoolean("clock", v).apply() }
+
+              fun loadItems(): MutableList<Item>? {
+                  val s = p.getString("items", null) ?: return null
+                  val out = mutableListOf<Item>()
+                  try {
+                      val a = JSONArray(s)
+                      for (i in 0 until a.length()) {
+                          val o = a.getJSONObject(i)
+                          val pk = mutableListOf<String>()
+                          val pa = o.optJSONArray("pkgs")
+                          if (pa != null) {
+                              for (j in 0 until pa.length()) pk.add(pa.getString(j))
+                          }
+                          out.add(Item(o.getString("type"), o.getString("key"), o.optInt("w", 1), o.optInt("h", 1), o.optString("name", ""), pk, o.optInt("wid", -1)))
+                      }
+                  } catch (e: Exception) {
+                      return null
+                  }
+                  return out
+              }
+
+              fun saveItems(list: List<Item>) {
+                  val a = JSONArray()
+                  for (x in list) {
+                      val o = JSONObject()
+                      o.put("type", x.type)
+                      o.put("key", x.key)
+                      o.put("w", x.w)
+                      o.put("h", x.h)
+                      o.put("name", x.name)
+                      o.put("wid", x.widgetId)
+                      val pa = JSONArray()
+                      for (k in x.pkgs) pa.put(k)
+                      o.put("pkgs", pa)
+                      a.put(o)
+                  }
+                  p.edit().putString("items", a.toString()).apply()
+              }
+
+              fun loadDock(): MutableList<String>? {
+                  val s = p.getString("dock", null) ?: return null
+                  return s.split(",").filter { it.isNotEmpty() }.toMutableList()
+              }
+
+              fun saveDock(list: List<String>) {
+                  p.edit().putString("dock", list.joinToString(",")).apply()
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/ioslauncher/PageLayout.kt << 'EOF'
+          package com.ioslauncher
+
+          import android.content.Context
+          import android.view.ViewGroup
+          import kotlin.math.max
+
+          class PageLayout(ctx: Context, private val cols: Int, private val rows: Int, insetDp: Int) : ViewGroup(ctx) {
+
+              class P(val c: Int, val r: Int, val w: Int, val h: Int) : ViewGroup.LayoutParams(0, 0)
+
+              private val inset = (insetDp * resources.displayMetrics.density).toInt()
+              private var cw = 0
+              private var ch = 0
+
+              override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                  val w = MeasureSpec.getSize(widthMeasureSpec)
+                  val h = MeasureSpec.getSize(heightMeasureSpec)
+                  cw = (w - paddingLeft - paddingRight) / cols
+                  ch = (h - paddingTop - paddingBottom) / rows
+                  for (i in 0 until childCount) {
+                      val v = getChildAt(i)
+                      val lp = v.layoutParams as P
+                      v.measure(
+                          MeasureSpec.makeMeasureSpec(max(0, cw * lp.w - 2 * inset), MeasureSpec.EXACTLY),
+                          MeasureSpec.makeMeasureSpec(max(0, ch * lp.h - 2 * inset), MeasureSpec.EXACTLY)
+                      )
+                  }
+                  setMeasuredDimension(w, h)
+              }
+
+              override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
+                  for (i in 0 until childCount) {
+                      val v = getChildAt(i)
+                      val lp = v.layoutParams as P
+                      val left = paddingLeft + lp.c * cw + inset
+                      val top = paddingTop + lp.r * ch + inset
+                      v.layout(left, top, left + v.measuredWidth, top + v.measuredHeight)
+                  }
+              }
+
+              override fun checkLayoutParams(p: ViewGroup.LayoutParams?): Boolean = p is P
+              override fun generateDefaultLayoutParams(): ViewGroup.LayoutParams = P(0, 0, 1, 1)
+              override fun generateLayoutParams(p: ViewGroup.LayoutParams?): ViewGroup.LayoutParams = P(0, 0, 1, 1)
+          }
+          EOF
+
           cat > app/src/main/java/com/ioslauncher/MainActivity.kt << 'EOF'
           package com.ioslauncher
 
           import android.app.Activity
           import android.app.AlertDialog
+          import android.appwidget.AppWidgetHost
+          import android.appwidget.AppWidgetHostView
+          import android.appwidget.AppWidgetManager
+          import android.appwidget.AppWidgetProviderInfo
+          import android.content.ClipData
           import android.content.Intent
           import android.content.pm.PackageManager
+          import android.graphics.Bitmap
+          import android.graphics.Canvas
           import android.graphics.Color
           import android.graphics.Outline
+          import android.graphics.Path
+          import android.graphics.RectF
           import android.graphics.Typeface
+          import android.graphics.drawable.AdaptiveIconDrawable
           import android.graphics.drawable.Drawable
           import android.graphics.drawable.GradientDrawable
           import android.net.Uri
+          import android.os.Build
           import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
           import android.provider.MediaStore
           import android.provider.Settings
+          import android.text.TextUtils
+          import android.view.DragEvent
           import android.view.Gravity
+          import android.view.HapticFeedbackConstants
           import android.view.View
           import android.view.ViewGroup
           import android.view.ViewOutlineProvider
           import android.view.WindowManager
           import android.widget.ArrayAdapter
+          import android.widget.CheckBox
           import android.widget.EditText
           import android.widget.FrameLayout
           import android.widget.GridLayout
           import android.widget.ImageView
           import android.widget.LinearLayout
           import android.widget.ListView
-          import android.widget.Space
+          import android.widget.ScrollView
+          import android.widget.SeekBar
           import android.widget.TextClock
           import android.widget.TextView
+          import android.widget.Toast
           import androidx.core.widget.doAfterTextChanged
           import androidx.recyclerview.widget.RecyclerView
           import androidx.viewpager2.widget.ViewPager2
+          import kotlin.math.max
+          import kotlin.math.min
 
-          data class AppItem(val label: String, val pkg: String, val intent: Intent, val icon: Drawable)
+          data class AppInfo(val label: String, val pkg: String, val intent: Intent, val icon: Drawable)
+
+          class Placed(val item: Item, val c: Int, val r: Int, val w: Int, val h: Int)
 
           class MainActivity : Activity() {
+              private lateinit var store: Store
+              private lateinit var host: AppWidgetHost
+              private lateinit var mgr: AppWidgetManager
               private lateinit var pager: ViewPager2
               private lateinit var dots: LinearLayout
               private lateinit var dock: LinearLayout
-              private var apps = listOf<AppItem>()
-              private var sig = ""
+              private lateinit var clockBox: LinearLayout
+              private lateinit var dragBar: LinearLayout
+              private lateinit var edgeL: View
+              private lateinit var edgeR: View
+
+              private val handler = Handler(Looper.getMainLooper())
+              private var installed = LinkedHashMap<String, AppInfo>()
+              private var items = mutableListOf<Item>()
+              private var dockPkgs = mutableListOf<String>()
+              private var pages = listOf<List<Placed>>()
               private var pageCount = 1
-              private val perPage = 24
+              private var sig = ""
+              private var ready = false
+              private var lastW = 0
+              private var lastH = 0
+              private var dragItem: Item? = null
+              private var pendingWidget = -1
+              private var loadedItems: MutableList<Item>? = null
+              private var loadedDock: MutableList<String>? = null
+              private val iconCache = HashMap<String, Bitmap>()
+              private val widgetViews = HashMap<Int, AppWidgetHostView>()
+              private val reqBind = 101
+              private val reqConfig = 102
 
               private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+              private fun dpf(v: Int) = v * resources.displayMetrics.density
+              private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
 
+              // ------------------------------------------------------------ UI
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
+                  store = Store(this)
+                  host = AppWidgetHost(this, 1024)
+                  mgr = AppWidgetManager.getInstance(this)
+                  loadedItems = store.loadItems()
+                  loadedDock = store.loadDock()
+
                   window.statusBarColor = Color.TRANSPARENT
                   window.navigationBarColor = Color.TRANSPARENT
                   window.decorView.systemUiVisibility =
@@ -185,6 +380,7 @@ jobs:
 
                   val shadow = Color.parseColor("#99000000")
                   val root = FrameLayout(this)
+                  root.layoutDirection = View.LAYOUT_DIRECTION_LTR
                   val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
                   root.addView(col, FrameLayout.LayoutParams(-1, -1))
                   root.setOnApplyWindowInsetsListener { v, i ->
@@ -192,43 +388,53 @@ jobs:
                       i
                   }
 
-                  // Clock widget
-                  val clockBox = LinearLayout(this).apply {
+                  // Clock
+                  clockBox = LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
                       gravity = Gravity.CENTER_HORIZONTAL
-                      setPadding(0, dp(16), 0, dp(4))
+                      setPadding(0, dp(10), 0, dp(2))
                   }
                   val date = TextClock(this).apply {
                       format12Hour = "EEEE, d MMMM"
                       format24Hour = "EEEE, d MMMM"
                       setTextColor(Color.WHITE)
                       textSize = 15f
+                      gravity = Gravity.CENTER
                       setShadowLayer(6f, 0f, 2f, shadow)
                   }
                   val time = TextClock(this).apply {
                       format12Hour = "h:mm"
                       format24Hour = "HH:mm"
                       setTextColor(Color.WHITE)
-                      textSize = 56f
+                      textSize = 50f
+                      gravity = Gravity.CENTER
                       typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
                       setShadowLayer(8f, 0f, 2f, shadow)
                   }
-                  clockBox.addView(date)
-                  clockBox.addView(time)
+                  clockBox.addView(date, LinearLayout.LayoutParams(-1, -2))
+                  clockBox.addView(time, LinearLayout.LayoutParams(-1, -2))
                   col.addView(clockBox, LinearLayout.LayoutParams(-1, -2))
 
-                  // Pages
+                  // Pager
                   pager = ViewPager2(this)
                   col.addView(pager, LinearLayout.LayoutParams(-1, 0, 1f))
+                  (pager.getChildAt(0) as? RecyclerView)?.overScrollMode = View.OVER_SCROLL_NEVER
                   pager.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
                       override fun onPageSelected(position: Int) = setDots(position)
                   })
+                  pager.addOnLayoutChangeListener { _, l, t, r, b, _, _, _, _ ->
+                      val w = r - l
+                      val h = b - t
+                      if (ready && w > 0 && h > 0 && (w != lastW || h != lastH)) {
+                          lastW = w
+                          lastH = h
+                          handler.post { iconCache.clear(); rebuildUi() }
+                      }
+                  }
 
-                  // Page dots
                   dots = LinearLayout(this).apply { gravity = Gravity.CENTER; setPadding(0, dp(4), 0, dp(8)) }
                   col.addView(dots, LinearLayout.LayoutParams(-1, -2))
 
-                  // Search pill
                   val pill = TextView(this).apply {
                       text = "Search"
                       setTextColor(Color.WHITE)
@@ -237,7 +443,7 @@ jobs:
                       setPadding(dp(36), dp(7), dp(36), dp(7))
                       background = GradientDrawable().apply {
                           setColor(Color.parseColor("#55FFFFFF"))
-                          cornerRadius = dp(20).toFloat()
+                          cornerRadius = dpf(20)
                       }
                       setOnClickListener { openSearch() }
                   }
@@ -246,21 +452,51 @@ jobs:
                       bottomMargin = dp(10)
                   })
 
-                  // Dock
                   dock = LinearLayout(this).apply {
                       orientation = LinearLayout.HORIZONTAL
                       gravity = Gravity.CENTER
                       setPadding(dp(8), dp(12), dp(8), dp(12))
                       background = GradientDrawable().apply {
                           setColor(Color.parseColor("#55FFFFFF"))
-                          cornerRadius = dp(34).toFloat()
+                          cornerRadius = dpf(34)
                       }
                   }
                   col.addView(dock, LinearLayout.LayoutParams(-1, -2).apply {
                       setMargins(dp(12), 0, dp(12), dp(10))
                   })
 
+                  // Drag bar and edge zones
+                  dragBar = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      setBackgroundColor(Color.parseColor("#CC000000"))
+                      visibility = View.GONE
+                  }
+                  val optV = barButton("Options")
+                  val delV = barButton("Delete / Uninstall")
+                  dragBar.addView(optV, LinearLayout.LayoutParams(0, -1, 1f))
+                  dragBar.addView(delV, LinearLayout.LayoutParams(0, -1, 1f))
+                  root.addView(dragBar, FrameLayout.LayoutParams(-1, dp(60)).apply { gravity = Gravity.TOP })
+                  dropTarget(optV) { d -> handler.post { options(d) } }
+                  dropTarget(delV) { d -> handler.post { deleteItem(d) } }
+
+                  edgeL = View(this).apply { setBackgroundColor(Color.parseColor("#22FFFFFF")); visibility = View.GONE }
+                  edgeR = View(this).apply { setBackgroundColor(Color.parseColor("#22FFFFFF")); visibility = View.GONE }
+                  root.addView(edgeL, FrameLayout.LayoutParams(dp(32), -1).apply { gravity = Gravity.START })
+                  root.addView(edgeR, FrameLayout.LayoutParams(dp(32), -1).apply { gravity = Gravity.END })
+                  edgeZone(edgeL, -1)
+                  edgeZone(edgeR, 1)
+
                   setContentView(root)
+              }
+
+              override fun onStart() {
+                  super.onStart()
+                  try { host.startListening() } catch (e: Exception) {}
+              }
+
+              override fun onStop() {
+                  super.onStop()
+                  try { host.stopListening() } catch (e: Exception) {}
               }
 
               override fun onResume() {
@@ -276,13 +512,23 @@ jobs:
               @Deprecated("Deprecated in Java")
               override fun onBackPressed() {}
 
+              private fun barButton(t: String): TextView = TextView(this).apply {
+                  text = t
+                  setTextColor(Color.WHITE)
+                  textSize = 15f
+                  gravity = Gravity.CENTER
+                  alpha = 0.8f
+              }
+
+              // ------------------------------------------------------------ Data
               private fun refresh() {
                   val pm = packageManager
-                  val base = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-                  val list = pm.queryIntentActivities(base, 0)
+                  val q = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                  val list = pm.queryIntentActivities(q, 0)
                       .filter { it.activityInfo.packageName != packageName }
+                      .distinctBy { it.activityInfo.packageName }
                       .map { r ->
-                          AppItem(
+                          AppInfo(
                               r.loadLabel(pm).toString(),
                               r.activityInfo.packageName,
                               Intent(Intent.ACTION_MAIN)
@@ -293,34 +539,147 @@ jobs:
                           )
                       }
                       .sortedBy { it.label.lowercase() }
-                  val s = list.joinToString { it.pkg }
-                  if (s == sig) return
+                  val s = list.joinToString(",") { it.pkg }
+                  if (ready && s == sig) return
                   sig = s
-                  apps = list
+                  installed = LinkedHashMap()
+                  for (a in list) installed[a.pkg] = a
 
+                  if (!ready) {
+                      items = loadedItems ?: mutableListOf()
+                      dockPkgs = loadedDock ?: defaultDock()
+                  }
+
+                  val iter = items.iterator()
+                  while (iter.hasNext()) {
+                      val x = iter.next()
+                      if (x.type == "app") {
+                          if (!installed.containsKey(x.key)) iter.remove()
+                      } else if (x.type == "folder") {
+                          x.pkgs.retainAll { installed.containsKey(it) }
+                      } else if (x.type == "widget") {
+                          if (mgr.getAppWidgetInfo(x.widgetId) == null) iter.remove()
+                      }
+                  }
+                  dockPkgs.retainAll { installed.containsKey(it) }
+
+                  val present = HashSet<String>()
+                  for (x in items) {
+                      if (x.type == "app") present.add(x.key)
+                      else if (x.type == "folder") present.addAll(x.pkgs)
+                  }
+                  present.addAll(dockPkgs)
+                  for (a in list) {
+                      if (!present.contains(a.pkg)) items.add(Item("app", a.pkg))
+                  }
+
+                  ready = true
+                  save()
+                  rebuildUi()
+              }
+
+              private fun defaultDock(): MutableList<String> {
+                  val pm = packageManager
                   val probes = listOf(
                       Intent(Intent.ACTION_DIAL),
                       Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:")),
                       Intent(Intent.ACTION_VIEW, Uri.parse("https://example.com")),
                       Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA)
                   )
-                  val dockApps = probes
-                      .mapNotNull { pm.resolveActivity(it, PackageManager.MATCH_DEFAULT_ONLY)?.activityInfo?.packageName }
-                      .distinct()
-                      .mapNotNull { p -> list.firstOrNull { it.pkg == p } }
-                      .toMutableList()
-                  for (a in list) {
-                      if (dockApps.size >= 4) break
-                      if (a !in dockApps) dockApps.add(a)
+                  val out = mutableListOf<String>()
+                  for (p in probes) {
+                      val pk = pm.resolveActivity(p, PackageManager.MATCH_DEFAULT_ONLY)?.activityInfo?.packageName
+                      if (pk != null && installed.containsKey(pk) && !out.contains(pk)) out.add(pk)
                   }
+                  return out.take(4).toMutableList()
+              }
 
-                  dock.removeAllViews()
-                  for (a in dockApps.take(4)) dock.addView(cell(a, false), LinearLayout.LayoutParams(0, -2, 1f))
+              private fun save() {
+                  store.saveItems(items)
+                  store.saveDock(dockPkgs)
+              }
 
-                  val pages = list.filter { it !in dockApps }.chunked(perPage).ifEmpty { listOf(emptyList()) }
+              // ------------------------------------------------------------ Layout
+              private fun buildPages(): List<List<Placed>> {
+                  val cols = store.cols
+                  val rows = store.rows
+                  val occ = mutableListOf<Array<BooleanArray>>()
+                  val res = mutableListOf<MutableList<Placed>>()
+                  fun newPage() {
+                      occ.add(Array(rows) { BooleanArray(cols) })
+                      res.add(mutableListOf())
+                  }
+                  newPage()
+                  for (item in items) {
+                      val w = min(item.w, cols)
+                      val h = min(item.h, rows)
+                      var done = false
+                      var p = 0
+                      while (!done) {
+                          if (p >= occ.size) newPage()
+                          var r = 0
+                          while (r <= rows - h && !done) {
+                              var c = 0
+                              while (c <= cols - w && !done) {
+                                  var free = true
+                                  for (rr in r until r + h) {
+                                      for (cc in c until c + w) {
+                                          if (occ[p][rr][cc]) free = false
+                                      }
+                                  }
+                                  if (free) {
+                                      for (rr in r until r + h) {
+                                          for (cc in c until c + w) occ[p][rr][cc] = true
+                                      }
+                                      res[p].add(Placed(item, c, r, w, h))
+                                      done = true
+                                  }
+                                  c++
+                              }
+                              r++
+                          }
+                          p++
+                      }
+                  }
+                  return res
+              }
+
+              private fun cellDims(): Pair<Float, Float> {
+                  val w = if (pager.width > 0) pager.width else resources.displayMetrics.widthPixels
+                  val h = if (pager.height > 0) pager.height else (resources.displayMetrics.heightPixels * 0.6f).toInt()
+                  return Pair((w - dp(16)).toFloat() / store.cols, h.toFloat() / store.rows)
+              }
+
+              private fun iconPx(): Int {
+                  val (cw, ch) = cellDims()
+                  val labelSpace = if (store.labels) dp(30) else dp(10)
+                  val base = min(cw * 0.66f, ch - labelSpace)
+                  val px = min(base * store.iconPct / 100f, min(cw - dp(8), ch - dp(12)))
+                  return max(dp(24), px.toInt())
+              }
+
+              private fun rebuildUi() {
+                  if (!ready) return
+                  pages = buildPages()
                   pageCount = pages.size
+                  val cur = pager.currentItem
                   pager.adapter = PageAdapter(pages)
-                  setDots(0)
+                  pager.offscreenPageLimit = max(1, pageCount)
+                  pager.setCurrentItem(min(cur, pageCount - 1), false)
+                  clockBox.visibility = if (store.showClock) View.VISIBLE else View.GONE
+                  buildDock()
+                  setDots(pager.currentItem)
+              }
+
+              private fun buildDock() {
+                  dock.removeAllViews()
+                  val px = min(iconPx(), dp(66))
+                  for (pkg in dockPkgs) {
+                      val a = installed[pkg] ?: continue
+                      val c = iconCell(a, px, false, null)
+                      c.setOnLongClickListener { dockMenu(pkg); true }
+                      dock.addView(c, LinearLayout.LayoutParams(0, -2, 1f))
+                  }
               }
 
               private fun setDots(sel: Int) {
@@ -337,73 +696,710 @@ jobs:
                   }
               }
 
-              private fun cell(a: AppItem, label: Boolean): View {
+              inner class PageAdapter(private val data: List<List<Placed>>) :
+                  RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+                  override fun getItemCount() = data.size
+
+                  override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+                      val pl = PageLayout(this@MainActivity, store.cols, store.rows, 3)
+                      pl.setPadding(dp(8), 0, dp(8), 0)
+                      pl.layoutParams = RecyclerView.LayoutParams(-1, -1)
+                      pl.setOnLongClickListener { homeMenu(); true }
+                      pl.setOnDragListener { v, e -> pageDrag(v, e) }
+                      return object : RecyclerView.ViewHolder(pl) {}
+                  }
+
+                  override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+                      val pl = holder.itemView as PageLayout
+                      pl.tag = position
+                      pl.removeAllViews()
+                      for (p in data[position]) pl.addView(viewFor(p), PageLayout.P(p.c, p.r, p.w, p.h))
+                  }
+              }
+
+              private fun viewFor(p: Placed): View {
+                  return when (p.item.type) {
+                      "app" -> {
+                          val a = installed[p.item.key]
+                          if (a == null) View(this) else iconCell(a, iconPx(), true, p.item)
+                      }
+                      "folder" -> folderView(p)
+                      else -> widgetView(p)
+                  }
+              }
+
+              // ------------------------------------------------------------ Icons
+              private fun render(d: Drawable, px: Int): Bitmap {
+                  val bmp = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888)
+                  val c = Canvas(bmp)
+                  val rad = px * store.roundPct / 100f
+                  val path = Path()
+                  path.addRoundRect(RectF(0f, 0f, px.toFloat(), px.toFloat()), rad, rad, Path.Direction.CW)
+                  c.clipPath(path)
+                  if (Build.VERSION.SDK_INT >= 26 && d is AdaptiveIconDrawable) {
+                      val pad = (px * 0.25f).toInt()
+                      d.setBounds(-pad, -pad, px + pad, px + pad)
+                      d.draw(c)
+                  } else {
+                      c.drawColor(Color.WHITE)
+                      val inset = (px * 0.1f).toInt()
+                      d.setBounds(inset, inset, px - inset, px - inset)
+                      d.draw(c)
+                  }
+                  return bmp
+              }
+
+              private fun iconBitmap(a: AppInfo, px: Int): Bitmap {
+                  val key = a.pkg + "@" + px + "@" + store.roundPct
+                  return iconCache.getOrPut(key) { render(a.icon, px) }
+              }
+
+              private fun label(t: String): TextView = TextView(this).apply {
+                  text = t
+                  setTextColor(Color.WHITE)
+                  textSize = 11f
+                  maxLines = 1
+                  ellipsize = TextUtils.TruncateAt.END
+                  gravity = Gravity.CENTER
+                  setShadowLayer(4f, 0f, 2f, Color.parseColor("#99000000"))
+              }
+
+              private fun iconCell(a: AppInfo, px: Int, withLabel: Boolean, item: Item?): View {
                   val c = LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
                       gravity = Gravity.CENTER
                   }
-                  val iv = ImageView(this).apply {
-                      setImageDrawable(a.icon)
-                      outlineProvider = object : ViewOutlineProvider() {
-                          override fun getOutline(v: View, o: Outline) {
-                              o.setRoundRect(0, 0, v.width, v.height, v.width * 0.225f)
-                          }
-                      }
-                      clipToOutline = true
-                  }
-                  c.addView(iv, LinearLayout.LayoutParams(dp(58), dp(58)))
-                  if (label) {
-                      val tv = TextView(this).apply {
-                          text = a.label
-                          setTextColor(Color.WHITE)
-                          textSize = 11f
-                          maxLines = 1
-                          ellipsize = android.text.TextUtils.TruncateAt.END
-                          gravity = Gravity.CENTER
-                          setShadowLayer(4f, 0f, 2f, Color.parseColor("#99000000"))
-                      }
-                      c.addView(tv, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(4) })
+                  val iv = ImageView(this)
+                  iv.setImageBitmap(iconBitmap(a, px))
+                  c.addView(iv, LinearLayout.LayoutParams(px, px))
+                  if (withLabel && store.labels) {
+                      c.addView(label(a.label), LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(3) })
                   }
                   c.setOnClickListener { launch(a) }
-                  c.setOnLongClickListener { options(a); true }
+                  if (item != null) {
+                      c.setOnLongClickListener { startDrag(c, item); true }
+                      c.setOnDragListener(dragOnItem(item))
+                  }
                   return c
               }
 
-              private fun launch(a: AppItem) {
+              private fun launch(a: AppInfo) {
                   try { startActivity(a.intent) } catch (e: Exception) {}
               }
 
-              private fun options(a: AppItem) {
-                  AlertDialog.Builder(this)
-                      .setTitle(a.label)
-                      .setItems(arrayOf("App info", "Uninstall")) { _, which ->
-                          try {
-                              if (which == 0) {
-                                  startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + a.pkg)))
-                              } else {
-                                  startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:" + a.pkg)))
-                              }
-                          } catch (e: Exception) {}
+              // ------------------------------------------------------------ Folders
+              private fun miniGrid(infos: List<AppInfo>, cols: Int, rows: Int, areaW: Int, areaH: Int, clickable: Boolean, f: Item): PageLayout {
+                  val g = PageLayout(this, cols, rows, 2)
+                  val px = max(dp(8), (min(areaW / cols, areaH / rows) * 0.86f).toInt())
+                  for ((i, a) in infos.take(cols * rows).withIndex()) {
+                      val iv = ImageView(this)
+                      iv.scaleType = ImageView.ScaleType.FIT_CENTER
+                      iv.setImageBitmap(iconBitmap(a, px))
+                      if (clickable) {
+                          iv.setOnClickListener { launch(a) }
+                          iv.setOnLongClickListener { folderAppMenu(f, a); true }
+                      }
+                      g.addView(iv, PageLayout.P(i % cols, i / cols, 1, 1))
+                  }
+                  return g
+              }
+
+              private fun folderView(pl: Placed): View {
+                  val f = pl.item
+                  val infos = f.pkgs.mapNotNull { installed[it] }
+                  val bg = GradientDrawable()
+                  bg.setColor(Color.parseColor("#66FFFFFF"))
+                  val c: View
+                  if (pl.w == 1 && pl.h == 1) {
+                      val px = iconPx()
+                      val box = FrameLayout(this)
+                      bg.cornerRadius = px * store.roundPct / 100f
+                      box.background = bg
+                      val pad = (px * 0.1f).toInt()
+                      val inner = px - 2 * pad
+                      box.addView(
+                          miniGrid(infos, 3, 3, inner, inner, false, f),
+                          FrameLayout.LayoutParams(inner, inner).apply { setMargins(pad, pad, pad, pad) }
+                      )
+                      val colv = LinearLayout(this).apply {
+                          orientation = LinearLayout.VERTICAL
+                          gravity = Gravity.CENTER
+                      }
+                      colv.addView(box, LinearLayout.LayoutParams(px, px))
+                      if (store.labels) colv.addView(label(f.name), LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(3) })
+                      c = colv
+                  } else {
+                      val (cw, ch) = cellDims()
+                      val w = (cw * pl.w).toInt() - dp(8)
+                      val h = (ch * pl.h).toInt() - dp(8)
+                      bg.cornerRadius = dpf(24)
+                      val box = FrameLayout(this)
+                      box.background = bg
+                      val nameH = dp(24)
+                      val cols = if (pl.w >= 4) 6 else 3
+                      val gw = w - dp(16)
+                      val gh = h - nameH - dp(8)
+                      box.addView(
+                          miniGrid(infos, cols, 3, gw, gh, true, f),
+                          FrameLayout.LayoutParams(gw, gh).apply { setMargins(dp(8), dp(6), dp(8), 0) }
+                      )
+                      box.addView(label(f.name), FrameLayout.LayoutParams(-1, nameH).apply { gravity = Gravity.BOTTOM })
+                      c = box
+                  }
+                  c.setOnClickListener { openFolder(f) }
+                  c.setOnLongClickListener { startDrag(c, f); true }
+                  c.setOnDragListener(dragOnItem(f))
+                  return c
+              }
+
+              private fun openFolder(f: Item) {
+                  val infos = f.pkgs.mapNotNull { installed[it] }
+                  val g = GridLayout(this)
+                  g.columnCount = 4
+                  g.setPadding(dp(8), dp(8), dp(8), dp(8))
+                  var dlg: AlertDialog? = null
+                  for (a in infos) {
+                      val cell = iconCell(a, dp(52), true, null)
+                      cell.setOnClickListener { dlg?.dismiss(); launch(a) }
+                      cell.setOnLongClickListener { dlg?.dismiss(); folderAppMenu(f, a); true }
+                      val lp = GridLayout.LayoutParams()
+                      lp.width = dp(76)
+                      lp.height = dp(84)
+                      g.addView(cell, lp)
+                  }
+                  val sv = ScrollView(this)
+                  sv.addView(g)
+                  dlg = AlertDialog.Builder(this).setTitle(f.name).setView(sv).create()
+                  dlg.show()
+              }
+
+              private fun folderAppMenu(f: Item, a: AppInfo) {
+                  AlertDialog.Builder(this).setTitle(a.label)
+                      .setItems(arrayOf("Open", "Remove from folder")) { _, i ->
+                          if (i == 0) {
+                              launch(a)
+                          } else {
+                              f.pkgs.remove(a.pkg)
+                              items.add(Item("app", a.pkg))
+                              save()
+                              rebuildUi()
+                          }
+                      }.show()
+              }
+
+              private fun newFolder() {
+                  val input = EditText(this)
+                  input.hint = "Folder name"
+                  input.setText("Folder")
+                  input.setSingleLine()
+                  AlertDialog.Builder(this).setTitle("New folder").setView(input)
+                      .setPositiveButton("Next") { _, _ ->
+                          val nm = input.text.toString().ifBlank { "Folder" }
+                          val f = Item("folder", "f" + System.currentTimeMillis(), 1, 1, nm)
+                          pickFolderSize(f) { editFolderApps(f, true) }
+                      }
+                      .setNegativeButton("Cancel", null).show()
+              }
+
+              private fun pickFolderSize(f: Item, then: () -> Unit) {
+                  val labels = arrayOf("Small (1 x 1)", "Medium (2 x 2)", "Large (4 x 2)")
+                  AlertDialog.Builder(this).setTitle("Folder size")
+                      .setItems(labels) { _, i ->
+                          if (i == 0) {
+                              f.w = 1
+                              f.h = 1
+                          } else if (i == 1) {
+                              f.w = 2
+                              f.h = 2
+                          } else {
+                              f.w = min(4, store.cols)
+                              f.h = 2
+                          }
+                          then()
+                      }.show()
+              }
+
+              private fun editFolderApps(f: Item, isNew: Boolean) {
+                  val homeApps = items.filter { it.type == "app" }.map { it.key }
+                  val keys = (f.pkgs + homeApps).distinct()
+                      .filter { installed.containsKey(it) }
+                      .sortedBy { installed[it]!!.label.lowercase() }
+                  val checked = BooleanArray(keys.size) { f.pkgs.contains(keys[it]) }
+                  val names = keys.map { installed[it]!!.label }.toTypedArray()
+                  AlertDialog.Builder(this).setTitle("Apps in folder")
+                      .setMultiChoiceItems(names, checked) { _, i, c -> checked[i] = c }
+                      .setPositiveButton("Done") { _, _ ->
+                          val newList = keys.filterIndexed { i, _ -> checked[i] }.toMutableList()
+                          for (k in f.pkgs) {
+                              if (!newList.contains(k)) items.add(Item("app", k))
+                          }
+                          for (k in newList) items.removeAll { it.type == "app" && it.key == k }
+                          f.pkgs = newList
+                          if (isNew) items.add(f)
+                          save()
+                          rebuildUi()
+                      }
+                      .setNegativeButton("Cancel", null).show()
+              }
+
+              private fun renameFolder(f: Item) {
+                  val input = EditText(this)
+                  input.setText(f.name)
+                  input.setSingleLine()
+                  AlertDialog.Builder(this).setTitle("Rename").setView(input)
+                      .setPositiveButton("OK") { _, _ ->
+                          f.name = input.text.toString().ifBlank { "Folder" }
+                          save()
+                          rebuildUi()
+                      }
+                      .setNegativeButton("Cancel", null).show()
+              }
+
+              private fun addToFolder(app: Item) {
+                  val folders = items.filter { it.type == "folder" }
+                  val names = (folders.map { it.name } + "New folder...").toTypedArray()
+                  AlertDialog.Builder(this).setTitle("Add to folder")
+                      .setItems(names) { _, i ->
+                          if (i < folders.size) {
+                              items.remove(app)
+                              folders[i].pkgs.add(app.key)
+                              save()
+                              rebuildUi()
+                          } else {
+                              newFolder()
+                          }
+                      }.show()
+              }
+
+              // ------------------------------------------------------------ Widgets
+              private fun appLabel(pkg: String): String {
+                  return try {
+                      packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+                  } catch (e: Exception) {
+                      pkg
+                  }
+              }
+
+              private fun pickWidget() {
+                  val pm = packageManager
+                  val list = mgr.installedProviders.sortedBy { it.loadLabel(pm).lowercase() }
+                  if (list.isEmpty()) {
+                      toast("No widgets found")
+                      return
+                  }
+                  val names = list.map { it.loadLabel(pm) + "   (" + appLabel(it.provider.packageName) + ")" }.toTypedArray()
+                  AlertDialog.Builder(this).setTitle("Add widget")
+                      .setItems(names) { _, i -> startBind(list[i]) }.show()
+              }
+
+              private fun startBind(p: AppWidgetProviderInfo) {
+                  val id = host.allocateAppWidgetId()
+                  pendingWidget = id
+                  var ok = false
+                  try { ok = mgr.bindAppWidgetIdIfAllowed(id, p.provider) } catch (e: Exception) {}
+                  if (ok) {
+                      afterBind(id)
+                  } else {
+                      val i = Intent(AppWidgetManager.ACTION_APPWIDGET_BIND)
+                      i.putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, id)
+                      i.putExtra(AppWidgetManager.EXTRA_APPWIDGET_PROVIDER, p.provider)
+                      try {
+                          startActivityForResult(i, reqBind)
+                      } catch (e: Exception) {
+                          host.deleteAppWidgetId(id)
+                          pendingWidget = -1
+                          toast("Cannot add this widget")
+                      }
+                  }
+              }
+
+              private fun afterBind(id: Int) {
+                  val info = mgr.getAppWidgetInfo(id)
+                  if (info == null) {
+                      host.deleteAppWidgetId(id)
+                      pendingWidget = -1
+                      toast("Cannot add this widget")
+                      return
+                  }
+                  if (info.configure != null) {
+                      try {
+                          host.startAppWidgetConfigureActivityForResult(this, id, 0, reqConfig, null)
+                      } catch (e: Exception) {
+                          chooseSize(id)
+                      }
+                  } else {
+                      chooseSize(id)
+                  }
+              }
+
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode == reqBind || requestCode == reqConfig) {
+                      val id = pendingWidget
+                      if (id < 0) return
+                      if (resultCode == RESULT_OK) {
+                          if (requestCode == reqBind) afterBind(id) else chooseSize(id)
+                      } else {
+                          host.deleteAppWidgetId(id)
+                          pendingWidget = -1
+                      }
+                  }
+              }
+
+              private fun chooseSize(id: Int) {
+                  val sizes = listOf(intArrayOf(2, 1), intArrayOf(2, 2), intArrayOf(4, 1), intArrayOf(4, 2), intArrayOf(4, 4))
+                      .filter { it[0] <= store.cols && it[1] <= store.rows }
+                  val names = sizes.map { it[0].toString() + " x " + it[1].toString() }.toTypedArray()
+                  AlertDialog.Builder(this).setTitle("Widget size (columns x rows)")
+                      .setItems(names) { _, i ->
+                          items.add(Item("widget", "w" + id, sizes[i][0], sizes[i][1], "", mutableListOf(), id))
+                          pendingWidget = -1
+                          save()
+                          rebuildUi()
+                          pager.setCurrentItem(max(0, pageCount - 1), true)
+                      }
+                      .setOnCancelListener {
+                          host.deleteAppWidgetId(id)
+                          pendingWidget = -1
                       }
                       .show()
               }
 
+              private fun rounded(r: Float) = object : ViewOutlineProvider() {
+                  override fun getOutline(v: View, o: Outline) {
+                      o.setRoundRect(0, 0, v.width, v.height, r)
+                  }
+              }
+
+              private fun widgetView(p: Placed): View {
+                  val id = p.item.widgetId
+                  val info = mgr.getAppWidgetInfo(id) ?: return View(this)
+                  val hv = widgetViews.getOrPut(id) {
+                      val v = host.createView(this, id, info)
+                      v.addOnLayoutChangeListener { _, l, t, r, b, _, _, _, _ ->
+                          val dm = resources.displayMetrics.density
+                          val w = ((r - l) / dm).toInt()
+                          val h = ((b - t) / dm).toInt()
+                          if (w > 0 && h > 0) v.updateAppWidgetSize(null, w, h, w, h)
+                      }
+                      v
+                  }
+                  (hv.parent as? ViewGroup)?.removeView(hv)
+                  hv.outlineProvider = rounded(dpf(22))
+                  hv.clipToOutline = true
+                  hv.setOnLongClickListener { startDrag(hv, p.item); true }
+                  hv.setOnDragListener(dragOnItem(p.item))
+                  return hv
+              }
+
+              // ------------------------------------------------------------ Drag and drop
+              private fun startDrag(v: View, item: Item) {
+                  dragItem = item
+                  dragBar.visibility = View.VISIBLE
+                  edgeL.visibility = View.VISIBLE
+                  edgeR.visibility = View.VISIBLE
+                  v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                  val ok = v.startDragAndDrop(ClipData.newPlainText("item", item.key), View.DragShadowBuilder(v), null, 0)
+                  if (!ok) endDrag()
+              }
+
+              private fun endDrag() {
+                  dragBar.visibility = View.GONE
+                  edgeL.visibility = View.GONE
+                  edgeR.visibility = View.GONE
+                  dragItem = null
+              }
+
+              private fun dragOnItem(target: Item) = View.OnDragListener { _, e ->
+                  when (e.action) {
+                      DragEvent.ACTION_DRAG_ENDED -> {
+                          endDrag()
+                          true
+                      }
+                      DragEvent.ACTION_DROP -> {
+                          dropOn(target)
+                          true
+                      }
+                      else -> true
+                  }
+              }
+
+              private fun pageDrag(v: View, e: DragEvent): Boolean {
+                  if (e.action == DragEvent.ACTION_DROP) {
+                      val pg = (v.tag as? Int) ?: 0
+                      dropOnPage(pg)
+                  } else if (e.action == DragEvent.ACTION_DRAG_ENDED) {
+                      endDrag()
+                  }
+                  return true
+              }
+
+              private fun dropOn(target: Item) {
+                  val d = dragItem ?: return
+                  if (d === target) return
+                  items.remove(d)
+                  if (target.type == "folder" && d.type == "app") {
+                      target.pkgs.add(d.key)
+                  } else {
+                      val idx = items.indexOf(target)
+                      items.add(if (idx < 0) items.size else idx, d)
+                  }
+                  save()
+                  handler.post { rebuildUi() }
+              }
+
+              private fun dropOnPage(page: Int) {
+                  val d = dragItem ?: return
+                  val last = pages.getOrNull(page)?.lastOrNull { it.item !== d }?.item
+                  items.remove(d)
+                  val idx = if (last == null) items.size else items.indexOf(last) + 1
+                  items.add(idx.coerceIn(0, items.size), d)
+                  save()
+                  handler.post { rebuildUi() }
+              }
+
+              private fun dropTarget(v: View, onDrop: (Item) -> Unit) {
+                  v.setOnDragListener { view, e ->
+                      when (e.action) {
+                          DragEvent.ACTION_DRAG_ENTERED -> view.alpha = 1f
+                          DragEvent.ACTION_DRAG_EXITED -> view.alpha = 0.8f
+                          DragEvent.ACTION_DROP -> {
+                              val d = dragItem
+                              if (d != null) onDrop(d)
+                          }
+                          DragEvent.ACTION_DRAG_ENDED -> {
+                              view.alpha = 0.8f
+                              endDrag()
+                          }
+                      }
+                      true
+                  }
+              }
+
+              private fun edgeZone(v: View, dir: Int) {
+                  val r = object : Runnable {
+                      override fun run() {
+                          val n = pager.currentItem + dir
+                          if (n >= 0 && n < pageCount) pager.setCurrentItem(n, true)
+                          handler.postDelayed(this, 700)
+                      }
+                  }
+                  v.setOnDragListener { _, e ->
+                      when (e.action) {
+                          DragEvent.ACTION_DRAG_ENTERED -> handler.postDelayed(r, 400)
+                          DragEvent.ACTION_DRAG_EXITED -> handler.removeCallbacks(r)
+                          DragEvent.ACTION_DROP -> handler.removeCallbacks(r)
+                          DragEvent.ACTION_DRAG_ENDED -> {
+                              handler.removeCallbacks(r)
+                              endDrag()
+                          }
+                      }
+                      true
+                  }
+              }
+
+              // ------------------------------------------------------------ Menus
+              private fun options(item: Item) {
+                  when (item.type) {
+                      "app" -> {
+                          val a = installed[item.key] ?: return
+                          AlertDialog.Builder(this).setTitle(a.label)
+                              .setItems(arrayOf("App info", "Uninstall", "Add to folder...", "Add to dock")) { _, i ->
+                                  when (i) {
+                                      0 -> try {
+                                          startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + a.pkg)))
+                                      } catch (e: Exception) {}
+                                      1 -> deleteItem(item)
+                                      2 -> addToFolder(item)
+                                      else -> {
+                                          if (dockPkgs.size >= 4) {
+                                              val old = dockPkgs.removeAt(dockPkgs.size - 1)
+                                              items.add(Item("app", old))
+                                          }
+                                          items.remove(item)
+                                          dockPkgs.add(a.pkg)
+                                          save()
+                                          rebuildUi()
+                                      }
+                                  }
+                              }.show()
+                      }
+                      "folder" -> {
+                          AlertDialog.Builder(this).setTitle(item.name)
+                              .setItems(arrayOf("Open", "Rename", "Edit apps", "Resize", "Delete folder")) { _, i ->
+                                  when (i) {
+                                      0 -> openFolder(item)
+                                      1 -> renameFolder(item)
+                                      2 -> editFolderApps(item, false)
+                                      3 -> pickFolderSize(item) { save(); rebuildUi() }
+                                      else -> deleteItem(item)
+                                  }
+                              }.show()
+                      }
+                      else -> {
+                          AlertDialog.Builder(this).setTitle("Widget")
+                              .setItems(arrayOf("Resize", "Remove")) { _, i ->
+                                  if (i == 0) resizeWidget(item) else deleteItem(item)
+                              }.show()
+                      }
+                  }
+              }
+
+              private fun resizeWidget(item: Item) {
+                  val sizes = listOf(intArrayOf(2, 1), intArrayOf(2, 2), intArrayOf(4, 1), intArrayOf(4, 2), intArrayOf(4, 4))
+                      .filter { it[0] <= store.cols && it[1] <= store.rows }
+                  val names = sizes.map { it[0].toString() + " x " + it[1].toString() }.toTypedArray()
+                  AlertDialog.Builder(this).setTitle("Widget size")
+                      .setItems(names) { _, i ->
+                          item.w = sizes[i][0]
+                          item.h = sizes[i][1]
+                          save()
+                          rebuildUi()
+                      }.show()
+              }
+
+              private fun deleteItem(d: Item) {
+                  if (d.type == "app") {
+                      try {
+                          startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:" + d.key)))
+                      } catch (e: Exception) {}
+                      return
+                  }
+                  if (d.type == "folder") {
+                      var at = items.indexOf(d)
+                      items.remove(d)
+                      if (at < 0) at = items.size
+                      for (k in d.pkgs) {
+                          items.add(min(at, items.size), Item("app", k))
+                          at++
+                      }
+                  } else {
+                      items.remove(d)
+                      host.deleteAppWidgetId(d.widgetId)
+                      widgetViews.remove(d.widgetId)
+                  }
+                  save()
+                  rebuildUi()
+              }
+
+              private fun dockMenu(pkg: String) {
+                  val a = installed[pkg] ?: return
+                  AlertDialog.Builder(this).setTitle(a.label)
+                      .setItems(arrayOf("Remove from dock", "App info")) { _, i ->
+                          if (i == 0) {
+                              dockPkgs.remove(pkg)
+                              items.add(Item("app", pkg))
+                              save()
+                              rebuildUi()
+                          } else {
+                              try {
+                                  startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + pkg)))
+                              } catch (e: Exception) {}
+                          }
+                      }.show()
+              }
+
+              private fun homeMenu() {
+                  AlertDialog.Builder(this)
+                      .setItems(arrayOf("Add widget", "New folder", "Manage folders and widgets", "Settings")) { _, i ->
+                          when (i) {
+                              0 -> pickWidget()
+                              1 -> newFolder()
+                              2 -> manage()
+                              else -> openSettings()
+                          }
+                      }.show()
+              }
+
+              private fun manage() {
+                  val list = items.filter { it.type != "app" }
+                  if (list.isEmpty()) {
+                      toast("Nothing to manage")
+                      return
+                  }
+                  val names = list.map {
+                      if (it.type == "folder") "Folder: " + it.name
+                      else "Widget: " + (mgr.getAppWidgetInfo(it.widgetId)?.loadLabel(packageManager) ?: "?")
+                  }.toTypedArray()
+                  AlertDialog.Builder(this).setTitle("Manage")
+                      .setItems(names) { _, i -> options(list[i]) }.show()
+              }
+
+              private fun seekRow(parent: LinearLayout, title: String, mn: Int, mx: Int, cur: Int, set: (Int) -> Unit) {
+                  val t = TextView(this)
+                  t.text = title + ": " + cur
+                  t.setTextColor(Color.WHITE)
+                  val s = SeekBar(this)
+                  s.max = mx - mn
+                  s.progress = cur - mn
+                  s.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                      override fun onProgressChanged(sb: SeekBar?, p: Int, u: Boolean) {
+                          t.text = title + ": " + (p + mn)
+                          set(p + mn)
+                      }
+                      override fun onStartTrackingTouch(sb: SeekBar?) {}
+                      override fun onStopTrackingTouch(sb: SeekBar?) {}
+                  })
+                  parent.addView(t)
+                  parent.addView(s)
+              }
+
+              private fun openSettings() {
+                  var c = store.cols
+                  var r = store.rows
+                  var p = store.iconPct
+                  var rd = store.roundPct
+                  val box = LinearLayout(this)
+                  box.orientation = LinearLayout.VERTICAL
+                  box.setPadding(dp(20), dp(12), dp(20), dp(4))
+                  seekRow(box, "Icons per row", 3, 6, c) { c = it }
+                  seekRow(box, "Rows per page", 4, 8, r) { r = it }
+                  seekRow(box, "Icon size %", 50, 130, p) { p = it }
+                  seekRow(box, "Icon roundness %", 0, 50, rd) { rd = it }
+                  val cbL = CheckBox(this)
+                  cbL.text = "Show app names"
+                  cbL.isChecked = store.labels
+                  cbL.setTextColor(Color.WHITE)
+                  val cbC = CheckBox(this)
+                  cbC.text = "Show clock"
+                  cbC.isChecked = store.showClock
+                  cbC.setTextColor(Color.WHITE)
+                  box.addView(cbL)
+                  box.addView(cbC)
+                  val sv = ScrollView(this)
+                  sv.addView(box)
+                  AlertDialog.Builder(this).setTitle("Launcher settings").setView(sv)
+                      .setPositiveButton("Save") { _, _ ->
+                          store.cols = c
+                          store.rows = r
+                          store.iconPct = p
+                          store.roundPct = rd
+                          store.labels = cbL.isChecked
+                          store.showClock = cbC.isChecked
+                          iconCache.clear()
+                          rebuildUi()
+                      }
+                      .setNegativeButton("Cancel", null).show()
+              }
+
               private fun openSearch() {
-                  val input = EditText(this).apply { hint = "Search apps"; setSingleLine() }
+                  val all = installed.values.toList()
+                  val input = EditText(this)
+                  input.hint = "Search apps"
+                  input.setSingleLine()
                   val listView = ListView(this)
-                  var shown = apps
+                  var shown = all
                   val adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, shown.map { it.label }.toMutableList())
                   listView.adapter = adapter
-                  val box = LinearLayout(this).apply {
-                      orientation = LinearLayout.VERTICAL
-                      setPadding(dp(16), dp(12), dp(16), dp(8))
-                      addView(input, LinearLayout.LayoutParams(-1, -2))
-                      addView(listView, LinearLayout.LayoutParams(-1, dp(320)))
-                  }
+                  val box = LinearLayout(this)
+                  box.orientation = LinearLayout.VERTICAL
+                  box.setPadding(dp(16), dp(12), dp(16), dp(8))
+                  box.addView(input, LinearLayout.LayoutParams(-1, -2))
+                  box.addView(listView, LinearLayout.LayoutParams(-1, dp(320)))
                   val dialog = AlertDialog.Builder(this).setView(box).create()
                   input.doAfterTextChanged { t ->
                       val q = t?.toString().orEmpty().trim().lowercase()
-                      shown = apps.filter { it.label.lowercase().contains(q) }
+                      shown = all.filter { it.label.lowercase().contains(q) }
                       adapter.clear()
                       adapter.addAll(shown.map { it.label })
                   }
@@ -414,34 +1410,6 @@ jobs:
                   dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
                   dialog.show()
                   input.requestFocus()
-              }
-
-              inner class PageAdapter(private val pages: List<List<AppItem>>) :
-                  RecyclerView.Adapter<RecyclerView.ViewHolder>() {
-                  override fun getItemCount() = pages.size
-
-                  override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
-                      val g = GridLayout(this@MainActivity).apply {
-                          columnCount = 4
-                          rowCount = 6
-                          setPadding(dp(12), dp(8), dp(12), dp(8))
-                          layoutParams = RecyclerView.LayoutParams(-1, -1)
-                      }
-                      return object : RecyclerView.ViewHolder(g) {}
-                  }
-
-                  override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
-                      val g = holder.itemView as GridLayout
-                      g.removeAllViews()
-                      for (i in 0 until perPage) {
-                          val v = pages[position].getOrNull(i)?.let { cell(it, true) } ?: Space(this@MainActivity)
-                          val lp = GridLayout.LayoutParams(
-                              GridLayout.spec(GridLayout.UNDEFINED, 1f),
-                              GridLayout.spec(GridLayout.UNDEFINED, 1f)
-                          ).apply { width = 0; height = 0 }
-                          g.addView(v, lp)
-                      }
-                  }
               }
           }
           EOF
