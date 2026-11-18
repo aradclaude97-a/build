@@ -1,0 +1,457 @@
+name: Build iOS Launcher
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      - name: Create project files
+        run: |
+          mkdir -p app/src/main/java/com/ioslauncher
+
+          cat > settings.gradle.kts << 'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "IOSLauncher"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts << 'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+
+          cat > gradle.properties << 'EOF'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx2g
+          EOF
+
+          cat > app/build.gradle.kts << 'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.ioslauncher"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.ioslauncher"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.viewpager2:viewpager2:1.0.0")
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.intent.action.DIAL" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.intent.action.SENDTO" />
+                      <data android:scheme="smsto" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.intent.action.VIEW" />
+                      <data android:scheme="https" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.media.action.STILL_IMAGE_CAMERA" />
+                  </intent>
+              </queries>
+              <application
+                  android:label="iOS Launcher"
+                  android:icon="@android:drawable/sym_def_app_icon"
+                  android:theme="@android:style/Theme.Material.Wallpaper.NoTitleBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTask"
+                      android:stateNotNeeded="true"
+                      android:excludeFromRecents="true"
+                      android:screenOrientation="portrait">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.HOME" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/ioslauncher/MainActivity.kt << 'EOF'
+          package com.ioslauncher
+
+          import android.app.Activity
+          import android.app.AlertDialog
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.graphics.Color
+          import android.graphics.Outline
+          import android.graphics.Typeface
+          import android.graphics.drawable.Drawable
+          import android.graphics.drawable.GradientDrawable
+          import android.net.Uri
+          import android.os.Bundle
+          import android.provider.MediaStore
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.view.ViewOutlineProvider
+          import android.view.WindowManager
+          import android.widget.ArrayAdapter
+          import android.widget.EditText
+          import android.widget.FrameLayout
+          import android.widget.GridLayout
+          import android.widget.ImageView
+          import android.widget.LinearLayout
+          import android.widget.ListView
+          import android.widget.Space
+          import android.widget.TextClock
+          import android.widget.TextView
+          import androidx.core.widget.doAfterTextChanged
+          import androidx.recyclerview.widget.RecyclerView
+          import androidx.viewpager2.widget.ViewPager2
+
+          data class AppItem(val label: String, val pkg: String, val intent: Intent, val icon: Drawable)
+
+          class MainActivity : Activity() {
+              private lateinit var pager: ViewPager2
+              private lateinit var dots: LinearLayout
+              private lateinit var dock: LinearLayout
+              private var apps = listOf<AppItem>()
+              private var sig = ""
+              private var pageCount = 1
+              private val perPage = 24
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  window.statusBarColor = Color.TRANSPARENT
+                  window.navigationBarColor = Color.TRANSPARENT
+                  window.decorView.systemUiVisibility =
+                      View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                      View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                      View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+
+                  val shadow = Color.parseColor("#99000000")
+                  val root = FrameLayout(this)
+                  val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  root.addView(col, FrameLayout.LayoutParams(-1, -1))
+                  root.setOnApplyWindowInsetsListener { v, i ->
+                      v.setPadding(0, i.systemWindowInsetTop, 0, i.systemWindowInsetBottom)
+                      i
+                  }
+
+                  // Clock widget
+                  val clockBox = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      gravity = Gravity.CENTER_HORIZONTAL
+                      setPadding(0, dp(16), 0, dp(4))
+                  }
+                  val date = TextClock(this).apply {
+                      format12Hour = "EEEE, d MMMM"
+                      format24Hour = "EEEE, d MMMM"
+                      setTextColor(Color.WHITE)
+                      textSize = 15f
+                      setShadowLayer(6f, 0f, 2f, shadow)
+                  }
+                  val time = TextClock(this).apply {
+                      format12Hour = "h:mm"
+                      format24Hour = "HH:mm"
+                      setTextColor(Color.WHITE)
+                      textSize = 56f
+                      typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+                      setShadowLayer(8f, 0f, 2f, shadow)
+                  }
+                  clockBox.addView(date)
+                  clockBox.addView(time)
+                  col.addView(clockBox, LinearLayout.LayoutParams(-1, -2))
+
+                  // Pages
+                  pager = ViewPager2(this)
+                  col.addView(pager, LinearLayout.LayoutParams(-1, 0, 1f))
+                  pager.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
+                      override fun onPageSelected(position: Int) = setDots(position)
+                  })
+
+                  // Page dots
+                  dots = LinearLayout(this).apply { gravity = Gravity.CENTER; setPadding(0, dp(4), 0, dp(8)) }
+                  col.addView(dots, LinearLayout.LayoutParams(-1, -2))
+
+                  // Search pill
+                  val pill = TextView(this).apply {
+                      text = "Search"
+                      setTextColor(Color.WHITE)
+                      textSize = 13f
+                      gravity = Gravity.CENTER
+                      setPadding(dp(36), dp(7), dp(36), dp(7))
+                      background = GradientDrawable().apply {
+                          setColor(Color.parseColor("#55FFFFFF"))
+                          cornerRadius = dp(20).toFloat()
+                      }
+                      setOnClickListener { openSearch() }
+                  }
+                  col.addView(pill, LinearLayout.LayoutParams(-2, -2).apply {
+                      gravity = Gravity.CENTER_HORIZONTAL
+                      bottomMargin = dp(10)
+                  })
+
+                  // Dock
+                  dock = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER
+                      setPadding(dp(8), dp(12), dp(8), dp(12))
+                      background = GradientDrawable().apply {
+                          setColor(Color.parseColor("#55FFFFFF"))
+                          cornerRadius = dp(34).toFloat()
+                      }
+                  }
+                  col.addView(dock, LinearLayout.LayoutParams(-1, -2).apply {
+                      setMargins(dp(12), 0, dp(12), dp(10))
+                  })
+
+                  setContentView(root)
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  refresh()
+              }
+
+              override fun onNewIntent(intent: Intent?) {
+                  super.onNewIntent(intent)
+                  pager.setCurrentItem(0, true)
+              }
+
+              @Deprecated("Deprecated in Java")
+              override fun onBackPressed() {}
+
+              private fun refresh() {
+                  val pm = packageManager
+                  val base = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                  val list = pm.queryIntentActivities(base, 0)
+                      .filter { it.activityInfo.packageName != packageName }
+                      .map { r ->
+                          AppItem(
+                              r.loadLabel(pm).toString(),
+                              r.activityInfo.packageName,
+                              Intent(Intent.ACTION_MAIN)
+                                  .addCategory(Intent.CATEGORY_LAUNCHER)
+                                  .setClassName(r.activityInfo.packageName, r.activityInfo.name)
+                                  .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                              r.loadIcon(pm)
+                          )
+                      }
+                      .sortedBy { it.label.lowercase() }
+                  val s = list.joinToString { it.pkg }
+                  if (s == sig) return
+                  sig = s
+                  apps = list
+
+                  val probes = listOf(
+                      Intent(Intent.ACTION_DIAL),
+                      Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:")),
+                      Intent(Intent.ACTION_VIEW, Uri.parse("https://example.com")),
+                      Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA)
+                  )
+                  val dockApps = probes
+                      .mapNotNull { pm.resolveActivity(it, PackageManager.MATCH_DEFAULT_ONLY)?.activityInfo?.packageName }
+                      .distinct()
+                      .mapNotNull { p -> list.firstOrNull { it.pkg == p } }
+                      .toMutableList()
+                  for (a in list) {
+                      if (dockApps.size >= 4) break
+                      if (a !in dockApps) dockApps.add(a)
+                  }
+
+                  dock.removeAllViews()
+                  for (a in dockApps.take(4)) dock.addView(cell(a, false), LinearLayout.LayoutParams(0, -2, 1f))
+
+                  val pages = list.filter { it !in dockApps }.chunked(perPage).ifEmpty { listOf(emptyList()) }
+                  pageCount = pages.size
+                  pager.adapter = PageAdapter(pages)
+                  setDots(0)
+              }
+
+              private fun setDots(sel: Int) {
+                  dots.removeAllViews()
+                  if (pageCount < 2) return
+                  for (i in 0 until pageCount) {
+                      val d = View(this).apply {
+                          background = GradientDrawable().apply {
+                              shape = GradientDrawable.OVAL
+                              setColor(if (i == sel) Color.WHITE else Color.parseColor("#80FFFFFF"))
+                          }
+                      }
+                      dots.addView(d, LinearLayout.LayoutParams(dp(7), dp(7)).apply { setMargins(dp(4), 0, dp(4), 0) })
+                  }
+              }
+
+              private fun cell(a: AppItem, label: Boolean): View {
+                  val c = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      gravity = Gravity.CENTER
+                  }
+                  val iv = ImageView(this).apply {
+                      setImageDrawable(a.icon)
+                      outlineProvider = object : ViewOutlineProvider() {
+                          override fun getOutline(v: View, o: Outline) {
+                              o.setRoundRect(0, 0, v.width, v.height, v.width * 0.225f)
+                          }
+                      }
+                      clipToOutline = true
+                  }
+                  c.addView(iv, LinearLayout.LayoutParams(dp(58), dp(58)))
+                  if (label) {
+                      val tv = TextView(this).apply {
+                          text = a.label
+                          setTextColor(Color.WHITE)
+                          textSize = 11f
+                          maxLines = 1
+                          ellipsize = android.text.TextUtils.TruncateAt.END
+                          gravity = Gravity.CENTER
+                          setShadowLayer(4f, 0f, 2f, Color.parseColor("#99000000"))
+                      }
+                      c.addView(tv, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(4) })
+                  }
+                  c.setOnClickListener { launch(a) }
+                  c.setOnLongClickListener { options(a); true }
+                  return c
+              }
+
+              private fun launch(a: AppItem) {
+                  try { startActivity(a.intent) } catch (e: Exception) {}
+              }
+
+              private fun options(a: AppItem) {
+                  AlertDialog.Builder(this)
+                      .setTitle(a.label)
+                      .setItems(arrayOf("App info", "Uninstall")) { _, which ->
+                          try {
+                              if (which == 0) {
+                                  startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + a.pkg)))
+                              } else {
+                                  startActivity(Intent(Intent.ACTION_DELETE, Uri.parse("package:" + a.pkg)))
+                              }
+                          } catch (e: Exception) {}
+                      }
+                      .show()
+              }
+
+              private fun openSearch() {
+                  val input = EditText(this).apply { hint = "Search apps"; setSingleLine() }
+                  val listView = ListView(this)
+                  var shown = apps
+                  val adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, shown.map { it.label }.toMutableList())
+                  listView.adapter = adapter
+                  val box = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(16), dp(12), dp(16), dp(8))
+                      addView(input, LinearLayout.LayoutParams(-1, -2))
+                      addView(listView, LinearLayout.LayoutParams(-1, dp(320)))
+                  }
+                  val dialog = AlertDialog.Builder(this).setView(box).create()
+                  input.doAfterTextChanged { t ->
+                      val q = t?.toString().orEmpty().trim().lowercase()
+                      shown = apps.filter { it.label.lowercase().contains(q) }
+                      adapter.clear()
+                      adapter.addAll(shown.map { it.label })
+                  }
+                  listView.setOnItemClickListener { _, _, i, _ ->
+                      shown.getOrNull(i)?.let { launch(it) }
+                      dialog.dismiss()
+                  }
+                  dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
+                  dialog.show()
+                  input.requestFocus()
+              }
+
+              inner class PageAdapter(private val pages: List<List<AppItem>>) :
+                  RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+                  override fun getItemCount() = pages.size
+
+                  override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+                      val g = GridLayout(this@MainActivity).apply {
+                          columnCount = 4
+                          rowCount = 6
+                          setPadding(dp(12), dp(8), dp(12), dp(8))
+                          layoutParams = RecyclerView.LayoutParams(-1, -1)
+                      }
+                      return object : RecyclerView.ViewHolder(g) {}
+                  }
+
+                  override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+                      val g = holder.itemView as GridLayout
+                      g.removeAllViews()
+                      for (i in 0 until perPage) {
+                          val v = pages[position].getOrNull(i)?.let { cell(it, true) } ?: Space(this@MainActivity)
+                          val lp = GridLayout.LayoutParams(
+                              GridLayout.spec(GridLayout.UNDEFINED, 1f),
+                              GridLayout.spec(GridLayout.UNDEFINED, 1f)
+                          ).apply { width = 0; height = 0 }
+                          g.addView(v, lp)
+                      }
+                  }
+              }
+          }
+          EOF
+
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Publish APK as release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: iOS Launcher v${{ github.run_number }}
+          files: app/build/outputs/apk/debug/app-debug.apk
